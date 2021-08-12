@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"regexp"
 	"sort"
@@ -129,6 +130,168 @@ func (api *API) Register(r *route.Router) {
 	r.Post("/silences", wrap(api.setSilence))
 	r.Get("/silence/:sid", wrap(api.getSilence))
 	r.Del("/silence/:sid", wrap(api.delSilence))
+	//告警组管理
+	r.Post("/whale/receiver", wrap(api.receiverAdd))
+	r.Put("/whale/receiver", wrap(api.receiverUpdate))
+	//todo
+	r.Get("/whale/receivers", wrap(api.receiverList))
+	r.Del("/whale/receiver/:name", wrap(api.receiverDel))
+	//告警路由管理
+	//r.Get("wh")
+
+}
+
+//新增告警组及对应的订阅人
+func (api *API) receiverAdd(w http.ResponseWriter, req *http.Request) {
+	api.mtx.Lock()
+	defer api.mtx.Unlock()
+
+	bs, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: err,
+		}, nil)
+		return
+	}
+
+	var newReceiver = new(config.Receiver)
+	err = json.Unmarshal(bs, newReceiver)
+	if err != nil {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: err,
+		}, nil)
+		return
+	}
+
+	for _, r := range api.config.Receivers {
+		if r.Name == newReceiver.Name {
+			api.respondError(w, apiError{
+				typ: errorBadData,
+				err: errors.New("duplicate receiver name"),
+			}, nil)
+			return
+		}
+	}
+	api.config.Receivers = append(api.config.Receivers, newReceiver)
+	api.respond(w, newReceiver)
+	//todo 需要持久化
+	return
+}
+
+//更新告警组中的订阅人，找到当前的告警组并在告警组中增加对应的订阅人
+func (api *API) receiverUpdate(w http.ResponseWriter, req *http.Request) {
+	api.mtx.Lock()
+	defer api.mtx.Unlock()
+	bs, err := ioutil.ReadAll(req.Body)
+	if err != nil {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: err,
+		}, nil)
+		return
+	}
+	var newReceiver = new(config.Receiver)
+	err = json.Unmarshal(bs, newReceiver)
+	if err != nil {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: err,
+		}, nil)
+		return
+	}
+	if len(newReceiver.WebhookConfigs) == 0 {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: errors.New("webhookConfigs is nil"),
+		}, nil)
+	}
+	loc := -1
+	for i, r := range api.config.Receivers {
+		if r.Name == newReceiver.Name {
+			loc = i
+			break
+		}
+	}
+	if loc == -1 {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: errors.New("no such receiver,need add receiver not update"),
+		}, nil)
+		return
+	}
+
+	api.config.Receivers[loc].WebhookConfigs = append(api.config.Receivers[loc].WebhookConfigs, newReceiver.WebhookConfigs...)
+	//todo 持久化
+	api.respond(w, api.config.Receivers[loc])
+	return
+}
+
+//todo 告警组的全量列表
+func (api *API) receiverList(w http.ResponseWriter, req *http.Request) {
+	api.mtx.RLock()
+	defer api.mtx.RUnlock()
+
+	receives := make([]config.Receiver, 0)
+	for _, r := range api.config.Receivers {
+		receives = append(receives, *r)
+	}
+
+	w.WriteHeader(200)
+	api.respond(w, api.config.Receivers)
+
+	return
+}
+
+//告警组删除
+func (api *API) receiverDel(w http.ResponseWriter, req *http.Request) {
+	api.mtx.Lock()
+	defer api.mtx.Unlock()
+	name := route.Param(req.Context(), "name")
+
+	var existReceiver func(route *dispatch.Route, receiver string) bool
+
+	existReceiver = func(route *dispatch.Route, receiver string) bool {
+		if route.RouteOpts.Receiver == receiver {
+			return true
+		}
+		for _, r := range route.Routes {
+			if existReceiver(r, receiver) {
+				return true
+			}
+		}
+		return false
+	}
+	if existReceiver(api.route, name) {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: errors.New("receiver is used by alertroute"),
+		}, nil)
+		return
+
+	}
+
+	loc := -1
+	for i, r := range api.config.Receivers {
+		if r.Name == name {
+			loc = i
+			break
+		}
+	}
+
+	if loc == -1 {
+		api.respondError(w, apiError{
+			typ: errorBadData,
+			err: errors.New("no such receiver to delete"),
+		}, nil)
+		return
+	}
+
+	api.config.Receivers = append(api.config.Receivers[:loc], api.config.Receivers[loc+1:]...)
+	//todo 持久化
+	api.respond(w, nil)
+	return
 }
 
 // Update sets the configuration string to a new value.
